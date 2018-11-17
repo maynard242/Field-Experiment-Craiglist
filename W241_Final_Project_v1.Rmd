@@ -1,0 +1,223 @@
+---
+title: "W241 Class Project - Analysis"
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+# 1. Load libraries, data
+
+Load up the data and do simple analysis. This version uses the complete dataset.
+
+```{r,error=FALSE, error=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+# Libraries
+library(lmtest)
+library(sandwich)
+library(ggplot2)
+library(data.table)
+library(stargazer)
+library(ri)
+library(multiwayvcov)
+library(AER)
+
+rm(list=ls())
+
+#d <- read.csv('~/mids-w241-final/Analysis/Combined Log.csv')
+d <- read.csv("C:/Users/Chris/OneDrive/Documents/MIDS/WS241/final/mids-w241-final/Analysis/Combined Log.csv")
+d <- data.table(d)
+# d <- d[complete.cases(d),] drops any row that is too incomplete - too stringent since we have some cols which are not essential
+d <- d[!is.na(no)] # Just drop row with missing values
+
+# Base data
+head(d)
+
+# Convert, transform data for analysis
+
+# Drop some cols
+d[,c('title','full_URL', 'reply_email_TO_BE_FILLED_IN_standard','posting_ID','notes') :=NULL]
+
+# Set gender = 1 for Jane
+d[treatment_assignment=='Jane_Control' | treatment_assignment=='Jane_Treat_High' | treatment_assignment=='Jane_Treat_Low',gender:=1]
+d[treatment_assignment=='John_Control' | treatment_assignment=='John_Treat_High' | treatment_assignment=='John_Treat_Low',gender:=0]
+
+# Set treatment variable = 0 for control, 1 for low, 2 for high
+d[treatment_assignment=='Jane_Control' | treatment_assignment=='John_Control', treatment:=0]
+d[treatment_assignment=='Jane_Treat_Low' | treatment_assignment=='John_Treat_Low', treatment:=1]
+d[treatment_assignment=='Jane_Treat_High' | treatment_assignment=='John_Treat_High', treatment:=2]
+
+# Alternatively, treat treatment types as categorical variables instead of continuous
+d[treatment_assignment=='Jane_Treat_Low' | treatment_assignment=='John_Treat_Low', low_treatment:=1]
+d[treatment_assignment=='Jane_Treat_High' | treatment_assignment=='John_Treat_High', high_treatment:=1]
+d$low_treatment[is.na(d$low_treatment)] <- 0
+d$high_treatment[is.na(d$high_treatment)] <- 0
+
+d[low_treatment==1 | high_treatment==0, assigned:=1]
+d$assigned[is.na(d$assigned)] <- 0
+
+# Capture compliers
+d[sent!='', compliers:=1]
+d$compliers[is.na(d$compliers)] <- 0
+```
+# 2. Check data, do simple tables to check for balance
+
+For the most part it looks like we have a balanced dataset. 
+
+```{r}
+
+cat('Table of Outcomes:')
+table(d$outcome)
+
+cat('\nTable of Outcomes (By Gender):')
+table(d$outcome, d$gender)
+
+cat('\nTable of Outcomes (By Treatment):')
+table(d$outcome, d$treatment)
+
+cat('\nTable of Outcomes (By Treatment and Gender):')
+table(d$outcome, factor(d$treatment_assignment))
+
+cat('\nTable of Outcomes (By City):')
+table(d$outcome,factor(d$city))
+
+cat('\nTable of Outcomes (By Rooms):')
+table(d$outcome,factor(d$bedrooms))
+
+ggplot(d,aes(x=price))+geom_histogram()+facet_grid(~outcome)
+
+# Sqft info has missing values => we can drop all cases (see above) but for now leave this alone
+# Similar but somewhat worse issue for professional, same.email info
+
+```
+
+
+# 3. Analysis
+
+# Simple Analysis
+
+Doing chi-squared test of independence. Can't reject. 
+
+```{r}
+tbl <- table(d$outcome,d$gender)
+chisq.test(tbl)
+
+tbl <- table(d$outcome,d$treatment)
+chisq.test(tbl)
+
+tbl <- table(d$outcome,factor(d$treatment_assignment))
+tbl
+chisq.test(tbl)
+
+```
+
+# Regression
+
+*Blocking - by gender, by city, bedroom?
+*Cluster - none
+*Compliance - none
+*Spillover - yes, with same email; not sure how to incorporate
+
+Basic model
+  
+    Outcome variable = alpha + B_high + B_low + gender + covariates
+  
+
+```{r}
+
+# Model 1 - Basic model
+m1 <- lm(outcome~treatment,data=d)
+stargazer(m1,type='text')
+coeftest(m1, vcovHC(m1)) # Robust se 
+
+# Model 2 - Treatment & gender
+m2 <- lm(outcome~treatment*gender,data=d)
+stargazer(m2,type='text')
+coeftest(m2, vcovHC(m2)) # Robust se 
+
+# Model 3 - Treatment & gender + covariates
+m3 <- lm(outcome~treatment*gender+factor(city)+factor(bedrooms),data=d)
+stargazer(m3,type='text')
+coeftest(m3, vcovHC(m3)) # Robust se 
+
+# Model 4 - Treatment & gemder + covariates
+m4 <- lm(outcome~treatment*gender+factor(city)+factor(bedrooms)+price,data=d)
+stargazer(m4,type='text')
+coeftest(m4, vcovHC(m4)) # Robust se 
+
+
+```
+We cannot reject the null hypothesis of no effect. 
+
+Alternative model with treatment variables coded as categorical factors
+
+```{r}
+
+# Model 1 - Basic model
+m1 <- lm(outcome ~ low_treatment + high_treatment,data=d)                                                               
+stargazer(m1,type='text')
+coeftest(m1, vcovHC(m1)) # Robust se 
+
+# Model 2 - Treatment & gender
+m2 <- lm(outcome~low_treatment + high_treatment*gender,data=d)
+stargazer(m2,type='text')
+coeftest(m2, vcovHC(m2)) # Robust se 
+
+# Model 3 - Treatment & gender + covariates
+m3 <- lm(outcome~low_treatment + high_treatment + gender + factor(city) + factor(bedrooms) + price,data=d)
+stargazer(m3,type='text')
+coeftest(m3, vcovHC(m3)) # Robust se 
+
+
+```
+
+## Try with RI
+
+```{r}
+di <- d
+di[treatment==2,treatment:=1]
+di[,city:=as.numeric(factor(d$city))]
+
+hist(di$treatment)
+hist(di$city)
+
+y <- d$outcome
+Z <- d$treatment
+cls <- d$gender
+blk <- d$city
+  
+perms <- genperms(Z, clustvar = NULL, blockvar = blk)
+probs <- genprobexact(Z, clustvar = NULL, blockvar = blk) # probability of treatment
+ate <- estate(y,Z,prob=probs) # estimate the ATE
+
+
+Ys <- genouts(y,Z,ate=0) # generate potential outcomes under sharp null of no effect
+distout <- gendist(Ys,perms, prob=probs) # generate sampling dist. under sharp null
+dispdist(distout, ate, quantiles = c(0.025, 0.975), display.plot = TRUE) # display characteristics of sampling dist. for inference
+
+```
+
+## CACE
+```{r}
+# Using Models # NEEDS WORK
+itt_fit <- lm(outcome ~ treatment, data = d)
+summary(itt_fit)
+coeftest(itt_fit, vcovHC(itt_fit))
+
+itt_d_fit <- lm(compliers ~ treatment, data = d)
+coeftest(itt_d_fit)
+coeftest(itt_d_fit,vcovHC(itt_d_fit))
+
+itt_fit$coefficients[2] / itt_d_fit$coefficients[2]
+```
+
+
+```{r}
+# Manually compute CACE
+itt <- d[, mean(outcome[assigned == 1]) - mean(outcome[assigned == 0])]
+
+prop_treated <- d[ , mean(compliers/assigned, na.rm = T)]
+prop_treated <- d[assigned == 1, mean(compliers)]
+
+sprintf("%.10f", itt / prop_treated)
+```
